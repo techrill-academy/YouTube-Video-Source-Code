@@ -1,0 +1,72 @@
+name: Add Docs & Unit Tests After Merge to Main
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'InventoryApi/**'
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  add-docs-ut-to-new-files:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 2
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Install Copilot CLI
+      run: npm install -g @github/copilot
+
+    - name: Get list of added and changed files in the latest push to main
+      id: merged_files
+      run: |
+        # Get commit range for this push
+        if [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]; then
+          RANGE="${{ github.event.before }}..${{ github.sha }}"
+        else
+          # In case of force-push or first push
+          RANGE="${{ github.sha }}"
+        fi
+        # List only Added (A) and Modified (M) files
+        git diff --name-status $RANGE | awk '$1 == "A" || $1 == "M" {print $2}' > merged_files.txt
+        cat merged_files.txt
+        echo "files=$(paste -sd, merged_files.txt)" >> $GITHUB_OUTPUT
+        echo "$(paste -sd, merged_files.txt)"
+    
+    - name: Add documentation and unit tests using Copilot CLI (programmatic mode)
+      env:
+        GH_TOKEN: ${{ secrets.GH_TOKEN }}
+      run: |
+        while read file; do
+          [ -f "$file" ] || continue
+          # Add missing documentation
+          copilot -p "Add any missing documentation to $file." --allow-all-tools
+          # Generate or update unit tests
+          copilot -p "Generate or update unit tests for $file. If there is a corresponding test file, update it; otherwise, create a new test file in the appropriate tests directory." --allow-all-tools
+        done < merged_files.txt
+        
+    - name: Create new branch and commit changes if any docs were added
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "+github-actions[bot]@users.noreply.github.com"
+        timestamp=$(date +%s)
+        branch="main-docs-$timestamp"
+        git checkout -b $branch
+        if ! git diff --exit-code; then
+          git add .
+          git commit -m "Add missing documentation to files merged to main"
+          git push origin $branch
+        else
+          echo "No documentation updates to commit."
+        fi

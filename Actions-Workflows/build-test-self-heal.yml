@@ -1,0 +1,158 @@
+name: Build Test Workflow Self Heal
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  actions: read
+
+on:
+  workflow_run:
+    workflows: [".NET CI - Build & Test"]
+    types: [completed]
+
+jobs:
+  comment-on-failure:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'failure' }}
+    
+    steps:    
+      - name: Set commit SHA output
+        id: br-details
+        run: |
+          echo "head_sha=${{ github.event.workflow_run.head_sha }}" >> $GITHUB_OUTPUT
+          echo "head_branch=${{ github.event.workflow_run.head_branch }}" >> $GITHUB_OUTPUT
+          echo "run_id=${{ github.event.workflow_run.id }}" >> $GITHUB_OUTPUT
+              
+      - name: Get PR number and details
+        id: pr-details
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const head_sha = '${{ steps.br-details.outputs.head_sha }}';
+            const head_branch = '${{ steps.br-details.outputs.head_branch }}';
+            const head = `${context.repo.owner}:${head_branch}`;
+            
+            const pull_requests = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              head: head,
+              state: 'open'
+            });
+            
+            if (pull_requests.data.length === 0) {
+              console.log('No open PR found for this branch');
+              return;
+            }
+            
+            const pr = pull_requests.data[0];
+            core.setOutput('pr_number', pr.number);
+            core.setOutput('pr_title', pr.title);
+            core.setOutput('commit_sha', head_sha);
+            console.log(`Found PR #${pr.number}: ${pr.title}`);
+            
+      - name: Get failed job details
+        if: steps.pr-details.outputs.pr_number
+        uses: actions/github-script@v8
+        id: get-logs
+        with:
+          script: |
+            const run_id = '${{ steps.br-details.outputs.run_id }}';
+            // Get failed jobs from the workflow run
+            const jobs = await github.rest.actions.listJobsForWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: run_id,
+            });
+            
+            let jobSummary = '';
+            let failedJobs = [];
+            let errorMessages = [];
+            
+            for (const job of jobs.data.jobs) {
+              if (job.conclusion === 'failure') {
+                console.log(`Found failed job: ${job.name}`);
+                failedJobs.push({
+                  name: job.name,
+                  html_url: job.html_url,
+                  steps: job.steps?.filter(step => step.conclusion === 'failure') || []
+                });
+                
+                jobSummary += `**Job: ${job.name}**\n`;
+                jobSummary += `- Status: Failed\n`;
+                
+                const failedSteps = job.steps?.filter(step => step.conclusion === 'failure') || [];
+                if (failedSteps.length > 0) {
+                  jobSummary += `- Failed steps: ${failedSteps.map(s => s.name).join(', ')}\n`;
+                }
+                jobSummary += `- [View logs](${job.html_url})\n\n`;
+
+                // Download job logs
+                const logResponse = await github.rest.actions.downloadJobLogsForWorkflowRun({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  job_id: job.id,
+                }).catch(() => null);
+      
+                let logText = '';
+                if (logResponse && logResponse.data) {
+                  if (typeof logResponse.data === 'string') {
+                    logText = logResponse.data;
+                  } else if (Buffer.isBuffer(logResponse.data)) {
+                    logText = logResponse.data.toString('utf-8');
+                  }
+                }
+      
+                // Extract error lines (TypeScript and general errors)
+                const errorRegex = /^.*Error:.*error TS\d+:.*$/gm; // <-- updated!
+                const genericErrorRegex = /^Error:.*$/gm;
+                const failedTest=/^Failed:.*$/gm;
+                let matches = logText.match(errorRegex) || logText.match(genericErrorRegex) || logText.match(failedTest) || [];
+                
+                matches = [...new Set(matches)]; // Deduplicate
+      
+                if (matches.length > 0) {
+                  errorMessages.push(...matches);
+                  console.log(errorMessages.join('\n'));
+                }
+              }
+            }
+            
+            core.setOutput('job_summary', jobSummary);
+            core.setOutput('errorMessages', errorMessages.join('\n'));
+            core.setOutput('failed_jobs_count', failedJobs.length);
+            
+      - name: Comment on PR
+        if: steps.pr-details.outputs.pr_number
+        uses: actions/github-script@v8
+        with:
+          github-token: ${{ secrets.PR_PAT }} 
+          script: |
+            const pr_number = parseInt('${{ steps.pr-details.outputs.pr_number }}');
+            const commit_sha = '${{ steps.pr-details.outputs.commit_sha }}';
+            const run_id = '${{ steps.br-details.outputs.run_id }}';
+            const workflow_name = 'PR Build';
+            const workflow_url = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${run_id}`;
+            
+            const jobSummary = `${{ steps.get-logs.outputs.job_summary }}`;
+            const errorMessages = `${{ steps.get-logs.outputs.errorMessages }}`;
+            const failedJobsCount = parseInt('${{ steps.get-logs.outputs.failed_jobs_count }}');
+            
+            let commentBody = `@copilot Fix the Build Failure \n\n`;
+            commentBody += `The **${workflow_name}** workflow failed for commit \`${commit_sha.substring(0, 7)}\`.\n\n`;
+            commentBody += `**Workflow Run:** [View Details](${workflow_url})\n\n`;
+            
+            if (jobSummary) {
+              commentBody += `### Failed Jobs Summary\n${jobSummary}`;
+            }
+            if (errorMessages) {
+              commentBody += `** Error Messages ** \n${errorMessages}\n`;
+            }  
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr_number,
+              body: commentBody
+            });
+            
+            console.log(`Posted error comment to PR #${pr_number}`);
