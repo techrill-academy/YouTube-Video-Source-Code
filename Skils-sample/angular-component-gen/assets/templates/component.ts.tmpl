@@ -1,0 +1,12 @@
+{{specComment}}import { ChangeDetectionStrategy, Component } from '@angular/core';
+
+@Component({
+  selector: '{{selector}}',
+  templateUrl: './{{kebab}}.html',
+  styleUrl: './{{kebab}}.scss',
+  changeDetection: ChangeDetectionStrategy.OnPush,
+  host: { class: 'block' },
+})
+export class {{className}} {
+  // TODO: declare input(), output(), signal(), computed() based on spec
+}
