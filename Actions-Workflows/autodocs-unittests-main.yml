@@ -28,6 +28,12 @@ jobs:
     - name: Install Copilot CLI
       run: npm install -g @github/copilot
 
+    - name: Copilot CLI login
+      env:
+        GH_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+      run: |
+        copilot -p "/login"
+
     - name: Get list of added and changed files in the latest push to main
       id: merged_files
       run: |
